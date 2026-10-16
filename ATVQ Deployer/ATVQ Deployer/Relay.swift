@@ -10,6 +10,7 @@
 // Frames are a 4-byte big-endian length then JSON — the same protocol ATVQ speaks:
 //   {"version":…, "dispatchedAt":…, "films":[…]}  → store, reply {"ok":true}
 //   {"fetch":true}                                 → reply with the held payload (or {"ok":true})
+//   {"ping":true}                                  → reply {"ok":true}, store nothing (FilmTracker's self-test)
 
 import Foundation
 import Network
@@ -21,6 +22,8 @@ final class Relay {
     private(set) var filmCount = 0
     private(set) var deliveries: [String: Date] = [:]   // ATVQ instance name → time delivered
     private(set) var isListening = false
+    /// Bonjour actually published `_atvqrelay._tcp` (see startListener).
+    private(set) var isAdvertised = false
     @ObservationIgnored var log: (String) -> Void = { _ in }
 
     private var held: Data?
@@ -71,9 +74,25 @@ final class Relay {
                     self?.log("Relay listening.")
                 case .failed(let error), .waiting(let error):
                     self?.isListening = false
+                    self?.isAdvertised = false
                     self?.log("Relay listener: \(error); restarting.")
                     self?.scheduleRestart()
                 default: break
+                }
+            }
+        }
+        // `.ready` only means the port is open. Whether Bonjour published the service is
+        // reported here; without it FilmTracker can never find the relay.
+        listener.serviceRegistrationUpdateHandler = { [weak self] change in
+            MainActor.assumeIsolated {
+                switch change {
+                case .add(let endpoint):
+                    self?.isAdvertised = true
+                    self?.log("Relay advertised as \(endpoint).")
+                case .remove:
+                    self?.isAdvertised = false
+                    self?.log("Relay advertisement withdrawn.")
+                @unknown default: break
                 }
             }
         }
@@ -102,6 +121,11 @@ final class Relay {
             guard let self, let body,
                   let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
                 Self.reply(#"{"ok":false,"error":"Invalid frame"}"#, on: connection); return
+            }
+            if object["ping"] as? Bool == true {
+                // FilmTracker's relay self-test: acknowledge, store nothing.
+                self.log("Relay answered a test dispatch from FilmTracker.")
+                Self.reply(#"{"ok":true}"#, on: connection); return
             }
             if object["fetch"] as? Bool == true {
                 self.log("ATVQ asked for the latest queue\(self.held == nil ? " (none held)" : "").")

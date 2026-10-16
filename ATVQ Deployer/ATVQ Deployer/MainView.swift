@@ -327,12 +327,15 @@ private struct RelayStatus: View {
             Text(summary)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
-            StatusGlyph(systemName: relay.isListening ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash",
-                        color: relay.isListening ? .green : .orange)
+            StatusGlyph(systemName: relay.isAdvertised ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash",
+                        color: relay.isAdvertised ? .green : .orange)
         }
     }
 
     private var summary: String {
+        // Listening without a Bonjour advertisement is unreachable: FilmTracker finds the
+        // relay only through Bonjour.
+        if relay.isListening && !relay.isAdvertised { return "Listening, but not advertised on the network" }
         guard let date = relay.heldDispatchedAt else {
             return relay.isListening ? "Listening, no queue held" : "Not listening"
         }
