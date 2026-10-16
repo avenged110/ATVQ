@@ -113,7 +113,6 @@ enum Tools {
         request.httpBody = Data(message.utf8)
         request.setValue(title, forHTTPHeaderField: "Title")
         request.setValue(urgent ? "high" : "default", forHTTPHeaderField: "Priority")
-        request.setValue("tv", forHTTPHeaderField: "Tags")
         guard let (_, response) = try? await URLSession.shared.data(for: request) else { return false }
         return (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false
     }

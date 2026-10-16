@@ -49,7 +49,7 @@ struct MainView: View {
                     Button("Open Logs") { NSWorkspace.shared.open(Storage.logsDirectory) }
                     Button("Refresh Now") { deployer.refresh(trigger: "manual") }
                         .keyboardShortcut("r")
-                        .disabled(deployer.isRunning)
+                        .disabled(deployer.isRunning || deployer.isPulling)
                 }
             }
 
@@ -63,6 +63,18 @@ struct MainView: View {
                         Button("Choose…", action: chooseProject)
                     }
                     .frame(maxWidth: Layout.fieldWidth + 80, alignment: .trailing)
+                }
+                TableRow("Source", note: "Pulls the latest version of the whole project folder from GitHub.") {
+                    HStack {
+                        if !deployer.pullStatus.isEmpty {
+                            Text(deployer.pullStatus)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.tail)
+                        }
+                        if deployer.isPulling { ProgressView().controlSize(.small) }
+                        Button("Pull Latest") { deployer.pullLatest() }
+                            .disabled(deployer.isPulling || deployer.isRunning || deployer.config.projectPath.isEmpty)
+                    }
                 }
                 TableRow("Scheme") { field($deployer.config.scheme) }
                 TableRow("Bundle ID") { field($deployer.config.bundleID) }

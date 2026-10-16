@@ -106,10 +106,39 @@ final class Deployer {
         appendLog("Found \(found.count) tvOS device(s).")
     }
 
+    // MARK: Source
+
+    private(set) var isPulling = false
+    /// The outcome of the last manual pull, shown beside its button.
+    private(set) var pullStatus = ""
+
+    /// `git pull --ff-only` on the repository holding the project: the top-level folder with
+    /// both the app and the deployer. Fast-forward only, so it never merges or overwrites.
+    func pullLatest() {
+        guard !isPulling, !isRunning, !config.projectPath.isEmpty else { return }
+        isPulling = true
+        pullStatus = "Pulling…"
+        let directory = URL(fileURLWithPath: config.projectPath).deletingLastPathComponent()
+        let sink: @Sendable (String) -> Void = { line in Task { @MainActor in self.appendLog(line) } }
+        appendLog("Pulling latest source (manual)")
+        Task {
+            let result = await ProcessRunner.run("/usr/bin/git", ["pull", "--ff-only"], in: directory, timeout: 300, onLine: sink)
+            let summary = result.output.split(separator: "\n").last.map(String.init) ?? ""
+            if result.succeeded {
+                pullStatus = result.output.contains("Already up to date") ? "Already up to date"
+                    : "Updated \(Date().formatted(date: .omitted, time: .shortened))"
+            } else {
+                pullStatus = result.timedOut ? "Timed out" : "Failed: \(summary)"
+                appendLog("git pull failed (status \(result.status)).")
+            }
+            isPulling = false
+        }
+    }
+
     // MARK: Pipeline
 
     func refresh(trigger: String) {
-        guard !isRunning else { return }
+        guard !isRunning, !isPulling else { return }
         isRunning = true
         let started = Date()
         let logURL = openRunLog(started)
