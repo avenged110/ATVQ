@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyLists-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged with the generated Info.plist. -->
+	<!-- Launch screen: ATVQ's own empty backdrop, so launch → app is seamless (no black frame). -->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIImageName</key>
+		<string>LaunchBackground</string>
+		<key>UIImageRespectsSafeAreaInsets</key>
+		<false/>
+	</dict>
+	<!-- Bonjour types ATVQ advertises and browses. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_atvq._tcp</string>
+		<string>_atvqrelay._tcp</string>
+	</array>
+</dict>
+</plist>
