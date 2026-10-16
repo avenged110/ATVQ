@@ -83,9 +83,7 @@ struct FilmDetailPane: View {
                     .modifier(GlyphRow(symbol: "timer"))
                     .opacity(isFocused || showsDuration ? 1 : 0)
                     .animation(.easeInOut(duration: 0.25), value: isFocused || showsDuration)
-                // One size down: this glyph's shape fills more of its box than the others'.
-                glyphRow("theatermasks.fill", film.genre.isEmpty ? "Unknown genre" : film.genre, dimmed: film.genre.isEmpty,
-                         symbolFont: .caption2)
+                glyphRow("theatermasks.fill", film.genre.isEmpty ? "Unknown genre" : film.genre, dimmed: film.genre.isEmpty)
                 glyphRow("opticaldisc.fill", film.source.isEmpty ? "None" : film.source, dimmed: film.source.isEmpty)
                 glyphRow("calendar.badge.clock", film.lastWatched.isEmpty ? "Never" : film.lastWatched, dimmed: false)
             }

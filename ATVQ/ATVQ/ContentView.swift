@@ -42,11 +42,34 @@ private struct EmptyScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             InstructionsCard()
         }
-        .background { Backdrop(image: nil) }
+        .background { AbstractBackdrop() }
     }
 }
 
 // MARK: - Shared pieces
+
+/// The instructions screen's own backdrop, used only before anything has been dispatched:
+/// soft, unequal blooms of color on the usual dark gradient, so the card has something to
+/// stand out from. Radial gradients rather than blurred shapes, so it costs nothing to draw.
+struct AbstractBackdrop: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color(white: 0.16), Color(red: 0.06, green: 0.07, blue: 0.10)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            bloom(Color(red: 0.16, green: 0.34, blue: 0.80), at: UnitPoint(x: 0.18, y: 0.22), radius: 900, strength: 0.55)
+            bloom(Color(red: 0.62, green: 0.16, blue: 0.58), at: UnitPoint(x: 0.82, y: 0.30), radius: 800, strength: 0.45)
+            bloom(Color(red: 0.08, green: 0.55, blue: 0.62), at: UnitPoint(x: 0.62, y: 0.92), radius: 900, strength: 0.45)
+            bloom(Color(red: 0.85, green: 0.38, blue: 0.20), at: UnitPoint(x: 0.08, y: 0.95), radius: 600, strength: 0.30)
+            Color.black.opacity(0.2)
+        }
+        .ignoresSafeArea()
+    }
+
+    private func bloom(_ color: Color, at center: UnitPoint, radius: CGFloat, strength: Double) -> some View {
+        RadialGradient(colors: [color.opacity(strength), color.opacity(strength * 0.35), color.opacity(0)],
+                       center: center, startRadius: 0, endRadius: radius)
+    }
+}
 
 /// Approximates the tvOS home backdrop: a heavily blurred image over a dark gradient.
 ///
@@ -72,15 +95,21 @@ struct Backdrop: View {
             ZStack {
                 ForEach(layers) { layer in
                     if let image = layer.image {
+                        // Each layer is blurred on its own and overscans the screen: a blur fades
+                        // an image's edges to transparent over ~3× the radius, so the fade has to
+                        // fall offscreen. Fading the layers' opacity, rather than blurring the
+                        // group, keeps the result a plain blend of the two images.
                         Image(uiImage: image)
                             .interpolation(.medium)
                             .resizable()
                             .scaledToFill()
+                            .padding(-200)
+                            .blur(radius: 50)
                             .opacity(layer.opacity)
                     }
                 }
             }
-            .blur(radius: 50)
+            .compositingGroup()
             .opacity(0.55)
             Color.black.opacity(0.2)
         }
