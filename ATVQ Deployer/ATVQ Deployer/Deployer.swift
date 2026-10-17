@@ -112,27 +112,49 @@ final class Deployer {
     /// The outcome of the last manual pull, shown beside its button.
     private(set) var pullStatus = ""
 
-    /// `git pull --ff-only` on the repository holding the project: the top-level folder with
-    /// both the app and the deployer. Fast-forward only, so it never merges or overwrites.
+    /// Makes the checkout match GitHub exactly: `git fetch`, then `git reset --hard` to the
+    /// branch's upstream. Tracked files edited or copied in locally are overwritten (that's
+    /// the point: this Mac only builds), untracked files are left alone. A plain
+    /// `git pull --ff-only` refused whenever the working tree differed from HEAD — e.g. files
+    /// synced in from another Mac — and so could never update. MainView confirms first.
     func pullLatest() {
         guard !isPulling, !isRunning, !config.projectPath.isEmpty else { return }
         isPulling = true
         pullStatus = "Pulling…"
         let directory = URL(fileURLWithPath: config.projectPath).deletingLastPathComponent()
-        let sink: @Sendable (String) -> Void = { line in Task { @MainActor in self.appendLog(line) } }
         appendLog("Pulling latest source (manual)")
         Task {
-            let result = await ProcessRunner.run("/usr/bin/git", ["pull", "--ff-only"], in: directory, timeout: 300, onLine: sink)
-            let summary = result.output.split(separator: "\n").last.map(String.init) ?? ""
-            if result.succeeded {
-                pullStatus = result.output.contains("Already up to date") ? "Already up to date"
-                    : "Updated \(Date().formatted(date: .omitted, time: .shortened))"
-            } else {
-                pullStatus = result.timedOut ? "Timed out" : "Failed: \(summary)"
-                appendLog("git pull failed (status \(result.status)).")
-            }
+            let (ok, detail) = await syncSource(in: directory)
+            pullStatus = ok ? detail : "Failed: \(detail)"
             isPulling = false
         }
+    }
+
+    /// Returns success and a one-line summary.
+    private func syncSource(in directory: URL) async -> (Bool, String) {
+        let sink: @Sendable (String) -> Void = { line in Task { @MainActor in self.appendLog(line) } }
+        let git = "/usr/bin/git"
+        let before = await ProcessRunner.run(git, ["rev-parse", "--short", "HEAD"], in: directory, timeout: 30, onLine: { _ in })
+        let fetch = await ProcessRunner.run(git, ["fetch", "--prune"], in: directory, timeout: 300, onLine: sink)
+        guard fetch.succeeded else {
+            appendLog("git fetch failed (status \(fetch.status)).")
+            return (false, fetch.timedOut ? "Timed out" : "couldn't reach GitHub")
+        }
+        let dirty = await ProcessRunner.run(git, ["status", "--porcelain", "--untracked-files=no"], in: directory, timeout: 30, onLine: { _ in })
+        let changed = dirty.output.split(separator: "\n").count
+        if changed > 0 { appendLog("Overwriting \(changed) locally changed file(s) with GitHub's version.") }
+        let reset = await ProcessRunner.run(git, ["reset", "--hard", "@{upstream}"], in: directory, timeout: 120, onLine: sink)
+        guard reset.succeeded else {
+            appendLog("git reset failed (status \(reset.status)).")
+            return (false, reset.output.split(separator: "\n").last.map(String.init) ?? "git reset failed")
+        }
+        let old = before.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let after = await ProcessRunner.run(git, ["rev-parse", "--short", "HEAD"], in: directory, timeout: 30, onLine: { _ in })
+        let new = after.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let time = Date().formatted(date: .omitted, time: .shortened)
+        if old == new && changed == 0 { appendLog("Source already up to date (\(new))."); return (true, "Already up to date") }
+        appendLog(old == new ? "Source restored to \(new)." : "Source updated \(old) → \(new).")
+        return (true, "Updated \(time)")
     }
 
     // MARK: Pipeline
@@ -163,8 +185,8 @@ final class Deployer {
 
         if config.gitPull {
             stage("Pulling latest source")
-            let pull = await ProcessRunner.run("/usr/bin/git", ["pull", "--ff-only"], in: projectDir, timeout: 300, onLine: sink)
-            if !pull.succeeded { appendLog("git pull failed; building the existing checkout.") }
+            let (pulled, _) = await syncSource(in: projectDir)
+            if !pulled { appendLog("Couldn't update the source; building the existing checkout.") }
         }
 
         // Xcode reuses a cached profile until it actually expires, so a profile inside the

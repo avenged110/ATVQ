@@ -14,7 +14,7 @@ struct DeployConfig: Codable, Equatable {
     var deviceName = ""
     var thresholdHours = 48.0       // refresh when less than this remains
     var checkIntervalMinutes = 20.0
-    var gitPull = false             // `git pull --ff-only` before building
+    var gitPull = false             // fetch + reset to GitHub before building
     var ntfyURL = ""                // e.g. https://ntfy.sh/your-secret-topic
     var launchAfterInstall = false  // launching can wake the Apple TV (and, via HDMI-CEC, the TV/receiver)
 

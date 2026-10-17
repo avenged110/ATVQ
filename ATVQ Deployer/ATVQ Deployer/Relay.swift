@@ -9,7 +9,8 @@
 //
 // Frames are a 4-byte big-endian length then JSON — the same protocol ATVQ speaks:
 //   {"version":…, "dispatchedAt":…, "films":[…]}  → store, reply {"ok":true}
-//   {"fetch":true}                                 → reply with the held payload (or {"ok":true})
+//   {"fetch":true}                                 → reply with the held payload (or {"ok":true});
+//                                                    ATVQ then answers {"ok":true} once it has decoded it
 //   {"ping":true}                                  → reply {"ok":true}, store nothing (FilmTracker's self-test)
 
 import Foundation
@@ -116,7 +117,8 @@ final class Relay {
 
     private func handle(_ connection: NWConnection) {
         connection.start(queue: .main)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { connection.cancel() }
+        // Generous: a queue with full-size posters can take a while over Wi-Fi.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 180) { connection.cancel() }
         Frames.receive(on: connection) { [weak self] body in
             guard let self, let body,
                   let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
@@ -128,10 +130,7 @@ final class Relay {
                 Self.reply(#"{"ok":true}"#, on: connection); return
             }
             if object["fetch"] as? Bool == true {
-                self.log("ATVQ asked for the latest queue\(self.held == nil ? " (none held)" : "").")
-                connection.send(content: Frames.frame(self.held ?? Data(#"{"ok":true}"#.utf8)),
-                                completion: .contentProcessed { _ in connection.cancel() })
-                return
+                self.answerFetch(on: connection); return
             }
             guard object["films"] != nil, let date = Self.dispatchedAt(in: body) else {
                 Self.reply(#"{"ok":false,"error":"Not a queue payload"}"#, on: connection); return
@@ -139,6 +138,45 @@ final class Relay {
             Self.reply(#"{"ok":true}"#, on: connection)
             self.accept(body, dispatchedAt: date)
         }
+    }
+
+    /// Sends the held queue, then waits for ATVQ's {"ok":true}, so the log says whether it
+    /// actually arrived rather than only that it was asked for.
+    private func answerFetch(on connection: NWConnection) {
+        let peer = Self.peerName(connection)
+        guard let held, let heldDispatchedAt else {
+            log("ATVQ (\(peer)) asked for the latest queue; none held.")
+            Self.reply(#"{"ok":true}"#, on: connection); return
+        }
+        let size = ByteCountFormatter.string(fromByteCount: Int64(held.count), countStyle: .file)
+        let dated = heldDispatchedAt.formatted(date: .abbreviated, time: .shortened)
+        log("ATVQ (\(peer)) asked for the latest queue; sending the one dispatched \(dated) (\(size)).")
+        connection.send(content: Frames.frame(held), completion: .contentProcessed { [weak self] error in
+            guard let error else { return }
+            MainActor.assumeIsolated { self?.log("Sending the queue to ATVQ (\(peer)) failed: \(error).") }
+            connection.cancel()
+        })
+        Frames.receive(on: connection) { [weak self] reply in
+            connection.cancel()
+            guard let self else { return }
+            let object = reply.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            if object?["ok"] as? Bool == true {
+                self.log("ATVQ (\(peer)) confirmed it received the queue.")
+                if self.held == held { self.deliveries[peer] = Date() }
+            } else if let error = object?["error"] as? String {
+                self.log("ATVQ (\(peer)) rejected the queue: \(error)")
+            } else {
+                // Builds of ATVQ before the confirmation was added never reply; neither does a
+                // transfer that broke off.
+                self.log("ATVQ (\(peer)) didn't confirm receipt (connection closed or older ATVQ build).")
+            }
+        }
+    }
+
+    private static func peerName(_ connection: NWConnection) -> String {
+        guard case .hostPort(let host, _) = connection.endpoint else { return "\(connection.endpoint)" }
+        let text = "\(host)"
+        return text.split(separator: "%").first.map(String.init) ?? text   // drop IPv6 scope ID
     }
 
     private func accept(_ body: Data, dispatchedAt date: Date) {
@@ -197,6 +235,10 @@ final class Relay {
     private func forward(_ body: Data, to name: String, endpoint: NWEndpoint) {
         inFlight.insert(name)
         let parameters = NWParameters.tcp
+        // IPv4 only: a Bonjour peer also resolves to an IPv6 link-local address, which firewalls
+        // (e.g. Little Snitch's "Local Network") commonly drop silently; a stalled IPv6 attempt
+        // then decides whether a dispatch goes through. Everything here is on one LAN, so IPv4 always works.
+        (parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options)?.version = .v4
         if loopbackOnly { parameters.requiredInterfaceType = .loopback }
         let connection = NWConnection(to: endpoint, using: parameters)
         var finished = false
@@ -215,7 +257,7 @@ final class Relay {
             }
         }
         connection.start(queue: .main)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { finish(false, "timed out") }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120) { finish(false, "timed out") }
         connection.send(content: Frames.frame(body), completion: .contentProcessed { error in
             if let error { MainActor.assumeIsolated { finish(false, "\(error)") } }
         })

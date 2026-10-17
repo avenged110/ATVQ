@@ -19,6 +19,7 @@ enum Layout {
 
 struct MainView: View {
     @Bindable var deployer: Deployer
+    @State private var confirmingPull = false
 
     var body: some View {
         ScrollView {
@@ -26,6 +27,12 @@ struct MainView: View {
         }
         .frame(width: Layout.windowWidth, height: Layout.windowHeight)
         .background(Color(nsColor: .windowBackgroundColor))
+        .alert("Replace the local project files?", isPresented: $confirmingPull) {
+            Button("Pull and Overwrite", role: .destructive) { deployer.pullLatest() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The project folder will be made to match GitHub exactly. Any changes to its files on this Mac will be lost; stash or copy them first if you want to keep them. Files that aren't part of the repository are left alone.")
+        }
     }
 
     private var cards: some View {
@@ -72,7 +79,7 @@ struct MainView: View {
                                 .lineLimit(1).truncationMode(.tail)
                         }
                         if deployer.isPulling { ProgressView().controlSize(.small) }
-                        Button("Pull Latest") { deployer.pullLatest() }
+                        Button("Pull Latest") { confirmingPull = true }
                             .disabled(deployer.isPulling || deployer.isRunning || deployer.config.projectPath.isEmpty)
                     }
                 }
@@ -112,7 +119,7 @@ struct MainView: View {
                     ValueStepper(value: $deployer.config.checkIntervalMinutes, in: 5...60, step: 5, unit: "min")
                         .onChange(of: deployer.config.checkIntervalMinutes) { deployer.scheduleTimer() }
                 }
-                TableCheckbox("Pull latest source before building", note: "Runs git pull --ff-only in the project's folder.",
+                TableCheckbox("Pull latest source before building", note: "Makes the project folder match GitHub, overwriting local changes to its files.",
                               isOn: $deployer.config.gitPull)
                 TableCheckbox("Launch ATVQ after installing", note: "This can wake the Apple TV, and the TV and receiver through HDMI-CEC.",
                               isOn: $deployer.config.launchAfterInstall)
@@ -359,23 +366,45 @@ private struct StatusGlyph: View {
     }
 }
 
-private struct LogView: View {
+/// A read-only NSTextView, so any range across lines can be selected and copied (SwiftUI
+/// Text views only select within one line). Follows new lines while scrolled to the bottom.
+private struct LogView: NSViewRepresentable {
     let lines: [String]
 
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    ForEach(lines.indices, id: \.self) { index in
-                        Text(lines[index]).font(.system(.caption, design: .monospaced)).textSelection(.enabled).id(index)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
-            }
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .onChange(of: lines.count) { _, count in proxy.scrollTo(count - 1, anchor: .bottom) }
+    final class Coordinator { var shownCount = 0, firstLine = "" }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        let textView = scrollView.documentView as! NSTextView
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        textView.textColor = .textColor
+        textView.backgroundColor = .textBackgroundColor
+        textView.textContainerInset = NSSize(width: 4, height: 6)
+        scrollView.wantsLayer = true
+        scrollView.layer?.cornerRadius = 6
+        scrollView.borderType = .noBorder
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView, let storage = unsafe textView.textStorage else { return }
+        let state = context.coordinator
+        let atBottom = scrollView.documentVisibleRect.maxY >= textView.bounds.maxY - 20
+        let attributes: [NSAttributedString.Key: Any] = [.font: textView.font as Any, .foregroundColor: NSColor.textColor]
+        // Append when the log only grew; rebuild when old lines were trimmed off the front.
+        if lines.first == state.firstLine, lines.count >= state.shownCount {
+            let added = lines[state.shownCount...].map { $0 + "\n" }.joined()
+            guard !added.isEmpty else { return }
+            storage.append(NSAttributedString(string: added, attributes: attributes))
+        } else {
+            storage.setAttributedString(NSAttributedString(string: lines.map { $0 + "\n" }.joined(), attributes: attributes))
         }
+        state.shownCount = lines.count
+        state.firstLine = lines.first ?? ""
+        if atBottom { textView.scrollToEndOfDocument(nil) }
     }
 }
