@@ -9,7 +9,7 @@ struct DeployConfig: Codable, Equatable {
     var projectPath = ""            // the .xcodeproj
     var scheme = "ATVQ"
     var bundleID = "app.ATVQ"
-    var teamID = ""                 // optional DEVELOPMENT_TEAM override (Personal Team ID)
+    var teamID = ""                 // DEVELOPMENT_TEAM; empty = the keychain's only Apple Development team
     var deviceID = ""               // devicectl identifier
     var deviceName = ""
     var thresholdHours = 48.0       // refresh when less than this remains

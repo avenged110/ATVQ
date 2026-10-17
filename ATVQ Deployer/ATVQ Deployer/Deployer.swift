@@ -199,7 +199,19 @@ final class Deployer {
         var buildArgs = ["xcodebuild", "-project", project.path, "-scheme", config.scheme,
                          "-destination", "generic/platform=tvOS", "-configuration", "Debug",
                          "-derivedDataPath", Storage.derivedData.path, "-allowProvisioningUpdates", "build"]
-        if !config.teamID.isEmpty { buildArgs.append("DEVELOPMENT_TEAM=\(config.teamID)") }
+        // The repository's project carries no team (it's per person), and pulling resets the
+        // checkout to it — so the team always comes from here, never from a selection in Xcode.
+        let teams = Tools.developmentTeamIDs()
+        let team = config.teamID.isEmpty ? (teams.count == 1 ? teams[0] : "") : config.teamID
+        guard !team.isEmpty else {
+            restoreProfiles(retired)
+            return (.signing, teams.isEmpty
+                ? "No Apple Development certificate in the keychain. Open the project in Xcode once, choose your Personal Team under Signing & Capabilities and build, then refresh again."
+                : "Several development teams are in the keychain. Enter the one to use in Team ID.")
+        }
+        // The team ID is never logged: failure text can go out as an ntfy alert.
+        if config.teamID.isEmpty { appendLog("Using the development team from the keychain.") }
+        buildArgs.append("DEVELOPMENT_TEAM=\(team)")
         let build = await ProcessRunner.run(Tools.xcrun, buildArgs, in: projectDir, timeout: 45 * 60, onLine: sink)
         guard build.succeeded else {
             restoreProfiles(retired)

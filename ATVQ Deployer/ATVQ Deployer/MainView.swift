@@ -85,7 +85,7 @@ struct MainView: View {
                 }
                 TableRow("Scheme") { field($deployer.config.scheme) }
                 TableRow("Bundle ID") { field($deployer.config.bundleID) }
-                TableRow("Team ID") { field($deployer.config.teamID, prompt: "Optional: uses the project's team") }
+                TableRow("Team ID") { field($deployer.config.teamID, prompt: "Automatic: from your keychain") }
                 TableRow("Apple TV") {
                     HStack {
                         Picker("Apple TV", selection: $deployer.config.deviceID) {

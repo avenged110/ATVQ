@@ -4,6 +4,7 @@
 // Thin wrappers around devicectl, security and ntfy, plus failure classification.
 
 import Foundation
+import Security
 
 struct TVDevice: Identifiable, Hashable {
     var id: String
@@ -33,6 +34,32 @@ enum Tools {
             return TVDevice(id: id, name: properties["name"] as? String ?? "Apple TV",
                             detail: [hardware["marketingName"] as? String, state].compactMap { $0 }.joined(separator: " · "))
         }
+    }
+
+    /// Team IDs of the "Apple Development" signing identities in the keychain (certificate and
+    /// private key both present). Xcode creates one per team the first time it signs for it;
+    /// a free Personal Team has exactly one. The team ID is the certificate's subject OU.
+    static func developmentTeamIDs() -> [String] {
+        let query: [String: Any] = [kSecClass as String: kSecClassIdentity,
+                                    kSecMatchLimit as String: kSecMatchLimitAll,
+                                    kSecReturnRef as String: true]
+        var items: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
+              let identities = items as? [SecIdentity] else { return [] }
+        var teams: [String] = []
+        for identity in identities {
+            var certificate: SecCertificate?
+            guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess, let certificate,
+                  let summary = SecCertificateCopySubjectSummary(certificate) as String?,
+                  summary.hasPrefix("Apple Development"),
+                  let values = SecCertificateCopyValues(certificate, [kSecOIDX509V1SubjectName] as CFArray, nil) as? [String: Any],
+                  let subject = values[kSecOIDX509V1SubjectName as String] as? [String: Any],
+                  let fields = subject[kSecPropertyKeyValue as String] as? [[String: Any]] else { continue }
+            for field in fields where field[kSecPropertyKeyLabel as String] as? String == kSecOIDOrganizationalUnitName as String {
+                if let team = field[kSecPropertyKeyValue as String] as? String, !teams.contains(team) { teams.append(team) }
+            }
+        }
+        return teams
     }
 
     /// Decodes a .mobileprovision (CMS-signed plist).
