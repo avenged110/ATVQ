@@ -8,6 +8,9 @@ import os
 
 enum Log {
     static let input = Logger(subsystem: "app.ATVQ", category: "input")
+    /// Relay polling and direct dispatches; filter Console on subsystem app.ATVQ.
+    static let relay = Logger(subsystem: "app.ATVQ", category: "relay")
+    static let listener = Logger(subsystem: "app.ATVQ", category: "listener")
 }
 
 struct QueueScreen: View {

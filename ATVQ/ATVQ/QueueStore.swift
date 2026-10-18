@@ -31,7 +31,14 @@ final class QueueStore {
     @ObservationIgnored private(set) var newestDispatch: Date?
     /// Film IDs of that dispatch: an equal timestamp with different films is a genuinely new
     /// dispatch (second-precision senders), while equal films is a duplicate.
-    private var newestFilmIDs: [UUID] = []
+    @ObservationIgnored private(set) var newestFilmIDs: [UUID] = []
+    /// What RelayClient reports holding when it polls.
+    var newestHeld: (date: Date, filmIDs: [UUID])? { newestDispatch.map { ($0, newestFilmIDs) } }
+
+    /// A held dispatch dated further ahead than this is treated as a clock error, not as the
+    /// newest: one bad timestamp from the sender's Mac would otherwise block every later queue
+    /// (and stay saved) until real time caught up with it.
+    nonisolated static let futureSlack: TimeInterval = 10 * 60
 
     /// Serial, so a quick second dispatch can never be overwritten on disk by the first.
     private nonisolated static let diskQueue = DispatchQueue(label: "ATVQ.QueueStore.disk", qos: .utility)
@@ -63,8 +70,9 @@ final class QueueStore {
     func applyNow(_ newPayload: QueuePayload, persist: Bool = false) async {
         let filmIDs = newPayload.films.map(\.id)
         if let newestDispatch {
-            if newPayload.dispatchedAt < newestDispatch { return }
             if newPayload.dispatchedAt == newestDispatch, filmIDs == newestFilmIDs { return }
+            let implausible = newestDispatch > Date().addingTimeInterval(Self.futureSlack)
+            if newPayload.dispatchedAt < newestDispatch, !implausible { return }
         }
         newestDispatch = newPayload.dispatchedAt
         newestFilmIDs = filmIDs
@@ -90,17 +98,6 @@ final class QueueStore {
         thumbnails = images.thumbnails
         backdrops = images.backdrops
         payload = shown.films.isEmpty ? nil : shown
-    }
-
-    func clear() {
-        newestDispatch = nil
-        newestFilmIDs = []
-        generation += 1
-        payload = nil
-        posters = [:]
-        thumbnails = [:]
-        backdrops = [:]
-        Self.diskQueue.async { try? FileManager.default.removeItem(at: Self.fileURL) }
     }
 
     private nonisolated static func decode(_ films: [QueueFilm])

@@ -20,7 +20,7 @@ struct ATVQApp: App {
                 .preferredColorScheme(.dark)
                 .onAppear {
                     listener.start { payload in store.apply(payload) }
-                    relay.start(have: { store.newestDispatch }, onPayload: { payload in store.apply(payload) })
+                    relay.start(have: { store.newestHeld }, onPayload: { payload in store.apply(payload) })
                     #if DEBUG
                     if ProcessInfo.processInfo.arguments.contains("-ATVQSample") { store.apply(SampleData.payload(), persist: false) }
                     #endif
@@ -29,7 +29,7 @@ struct ATVQApp: App {
                     switch phase {
                     case .active:
                         listener.restart()
-                        relay.start(have: { store.newestDispatch }, onPayload: { payload in store.apply(payload) })
+                        relay.start(have: { store.newestHeld }, onPayload: { payload in store.apply(payload) })
                     case .background:
                         listener.stop()
                         relay.stop()

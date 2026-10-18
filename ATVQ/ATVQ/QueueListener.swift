@@ -6,6 +6,7 @@
 
 import Foundation
 import Network
+import os
 
 final class QueueListener {
     static let serviceType = "_atvq._tcp"
@@ -29,6 +30,7 @@ final class QueueListener {
         listener.service = NWListener.Service(type: Self.serviceType)
         listener.stateUpdateHandler = { [weak self] state in
             MainActor.assumeIsolated {
+                Log.listener.info("Listener: \(String(describing: state), privacy: .public)")
                 switch state {
                 case .ready: self?.retryDelay = 1
                 // .waiting means the network went away (e.g. Wi-Fi dropped); start over
@@ -97,6 +99,7 @@ final class QueueListener {
                 guard payload.version <= QueuePayload.currentVersion else {
                     self.reply(QueueReply(ok: false, error: "Unsupported version \(payload.version); update ATVQ"), on: connection); return
                 }
+                Log.listener.info("Direct dispatch of \(payload.films.count) film(s) dispatched \(payload.dispatchedAt, privacy: .public)")
                 self.onReceive?(payload)
                 self.reply(QueueReply(ok: true), on: connection)
             } catch {

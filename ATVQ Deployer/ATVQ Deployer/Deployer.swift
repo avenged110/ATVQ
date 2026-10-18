@@ -34,6 +34,10 @@ final class Deployer {
     private var logHandle: FileHandle?
     private static let maxLogLines = 5000
     private static let keptLogFiles = 40
+    /// Relay events, always written (run logs exist only while a refresh runs). Rotated to
+    /// `relay.previous.log` past this size.
+    private var relayLogHandle: FileHandle?
+    private static let relayLogMaxBytes: UInt64 = 2 * 1024 * 1024
 
     init() {
         config = Storage.load(DeployConfig.self, "config.json") ?? DeployConfig()
@@ -45,12 +49,17 @@ final class Deployer {
     func start() {
         guard timer == nil else { return }
         appendLog("ATVQ Deployer started.")
-        relay.log = { [weak self] line in self?.appendLog(line) }
+        relay.log = { [weak self] line in
+            self?.appendLog(line)
+            self?.appendRelayLog(line)
+        }
         relay.start()
         scheduleTimer()
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.appendLog("Woke from sleep; checking.")
+                // Bonjour may have dropped the relay's advertisement while asleep.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self?.relay.restartNetworking() }
                 // Give the network a moment to come back before touching the device.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 60) { self?.check(trigger: "wake") }
             }
@@ -405,6 +414,25 @@ final class Deployer {
         if log.count > Self.maxLogLines + 500 { log.removeFirst(log.count - Self.maxLogLines) }
     }
 
+    private func appendRelayLog(_ line: String) {
+        let url = Storage.logsDirectory.appendingPathComponent("relay.log")
+        if relayLogHandle == nil {
+            if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
+            relayLogHandle = try? FileHandle(forWritingTo: url)
+            _ = try? relayLogHandle?.seekToEnd()
+        }
+        guard let handle = relayLogHandle else { return }
+        let stamp = Date().formatted(date: .numeric, time: .standard)   // local time, like the console
+        try? handle.write(contentsOf: Data("[\(stamp)] \(line)\n".utf8))
+        if let size = try? handle.offset(), size > Self.relayLogMaxBytes {
+            try? handle.close()
+            relayLogHandle = nil
+            let previous = Storage.logsDirectory.appendingPathComponent("relay.previous.log")
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.moveItem(at: url, to: previous)
+        }
+    }
+
     private func openRunLog(_ date: Date) -> URL? {
         let name = date.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false)).replacingOccurrences(of: ":", with: "-") + ".log"
         let url = Storage.logsDirectory.appendingPathComponent(name)
@@ -412,7 +440,7 @@ final class Deployer {
         logHandle = try? FileHandle(forWritingTo: url)
         // Keep only the newest run logs.
         if let files = try? FileManager.default.contentsOfDirectory(at: Storage.logsDirectory, includingPropertiesForKeys: nil)
-            .filter({ $0.pathExtension == "log" }).sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
+            .filter({ $0.pathExtension == "log" && !$0.lastPathComponent.hasPrefix("relay") }).sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
             files.dropFirst(Self.keptLogFiles).forEach { try? FileManager.default.removeItem(at: $0) }
         }
         return url

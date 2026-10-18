@@ -9,8 +9,9 @@
 //
 // Frames are a 4-byte big-endian length then JSON — the same protocol ATVQ speaks:
 //   {"version":…, "dispatchedAt":…, "films":[…]}  → store, reply {"ok":true}
-//   {"fetch":true, "have":…}                       → reply with the held payload if it's newer than
-//                                                    `have` (ATVQ's newest), else {"ok":true};
+//   {"fetch":true, "have":…, "haveFilms":[…]}      → reply with the held payload if it's newer than
+//                                                    `have` (ATVQ's newest) or has the same timestamp
+//                                                    but other films, else {"ok":true};
 //                                                    ATVQ then answers {"ok":true} once it has decoded it
 // ATVQ polls with fetch every few seconds while it's on screen, so that is the dependable
 // path; pushes only make a dispatch show up a little sooner.
@@ -38,6 +39,20 @@ final class Relay {
     private var inFlight: Set<String> = []
     private var retryTimer: Timer?
     private var restartDelay: TimeInterval = 2
+    private var restartPending = false
+    /// ATVQ's address → its Bonjour name, learned from pushes, so a fetch from the same Apple TV
+    /// is listed under the same name rather than a second time by address.
+    private var peerNames: [String: String] = [:]
+    /// The relay's usual port. A fixed port keeps a stale Bonjour record useful: an Apple TV
+    /// that slept through a relay restart may still have the old service record cached, and with
+    /// a port chosen afresh each start, that record pointed at nothing until it expired.
+    static let preferredPort: NWEndpoint.Port = 52741
+    /// Set when the preferred port couldn't be opened (e.g. another process holds it); the
+    /// relay then takes any free port, which Bonjour still advertises. Cleared on wake and on
+    /// each later restart, so the preferred port is tried again.
+    private var preferredPortUnavailable = false
+    /// A held dispatch dated further ahead than this is treated as a clock error (see accept).
+    private static let futureSlack: TimeInterval = 10 * 60
     /// Pushes happen only for a short while after a dispatch arrives. A sleeping Apple TV
     /// can stay advertised through the network's Bonjour Sleep Proxy, and connecting to it
     /// can wake it — and, via HDMI-CEC, the home theater. Pushing indefinitely could do
@@ -67,15 +82,29 @@ final class Relay {
     // MARK: Listening for FilmTracker (and ATVQ fetches)
 
     private func startListener() {
-        guard let listener = try? NWListener(using: .tcp) else { scheduleRestart(); return }
+        let parameters = NWParameters.tcp
+        // Restarting reopens the same port right away; don't let the old socket's TIME_WAIT block it.
+        parameters.allowLocalEndpointReuse = true
+        let usesPreferredPort = !preferredPortUnavailable
+        let created = usesPreferredPort
+            ? try? NWListener(using: parameters, on: Self.preferredPort)
+            : try? NWListener(using: parameters)
+        guard let listener = created else {
+            if usesPreferredPort { fallBackFromPreferredPort("couldn't create a listener on it"); return }
+            scheduleRestart(); return
+        }
         listener.service = NWListener.Service(type: "_atvqrelay._tcp")
         listener.stateUpdateHandler = { [weak self] state in
             MainActor.assumeIsolated {
                 switch state {
                 case .ready:
+                    // The backoff resets once Bonjour publishes the service, not here: a
+                    // listener that opens but is never advertised must keep backing off.
                     self?.isListening = true
-                    self?.restartDelay = 2
-                    self?.log("Relay listening.")
+                    let port = self?.listener?.port.map { "\($0)" } ?? "?"
+                    self?.log("Relay listening on port \(port)\(usesPreferredPort ? "" : " (fallback; the usual port \(Self.preferredPort) is unavailable)").")
+                case .failed(let error) where usesPreferredPort:
+                    self?.fallBackFromPreferredPort("\(error)")
                 case .failed(let error), .waiting(let error):
                     self?.isListening = false
                     self?.isAdvertised = false
@@ -92,10 +121,15 @@ final class Relay {
                 switch change {
                 case .add(let endpoint):
                     self?.isAdvertised = true
+                    self?.restartDelay = 2
                     self?.log("Relay advertised as \(endpoint).")
                 case .remove:
+                    // The listener stays `.ready` without it, so nothing else would ever bring
+                    // the advertisement back: FilmTracker and ATVQ couldn't find the relay
+                    // until the Deployer was relaunched. Start over to re-register.
                     self?.isAdvertised = false
-                    self?.log("Relay advertisement withdrawn.")
+                    self?.log("Relay advertisement withdrawn; re-registering.")
+                    self?.scheduleRestart()
                 @unknown default: break
                 }
             }
@@ -107,15 +141,50 @@ final class Relay {
         self.listener = listener
     }
 
+    /// The preferred port failed: open on any free port instead, at once.
+    private func fallBackFromPreferredPort(_ reason: String) {
+        log("Relay couldn't use port \(Self.preferredPort) (\(reason)); using another port.")
+        stopListener()
+        preferredPortUnavailable = true
+        if !restartPending { startListener() }
+    }
+
     private func scheduleRestart() {
-        listener?.stateUpdateHandler = nil
-        listener?.cancel()
-        listener = nil
+        stopListener()
+        preferredPortUnavailable = false
+        guard !restartPending else { return }
+        restartPending = true
         let delay = restartDelay
         restartDelay = min(restartDelay * 2, 120)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.restartPending = false
             if self?.listener == nil { self?.startListener() }
         }
+    }
+
+    private func stopListener() {
+        // Handlers first: cancelling reports the advertisement's removal, which mustn't
+        // schedule another restart.
+        listener?.stateUpdateHandler = nil
+        listener?.serviceRegistrationUpdateHandler = nil
+        listener?.newConnectionHandler = nil
+        listener?.cancel()
+        listener = nil
+        isListening = false
+        isAdvertised = false
+    }
+
+    /// After the Mac wakes: the listener can stay `.ready` while its advertisement is gone, and
+    /// the browser's view of which ATVQs exist is stale, so both start over.
+    func restartNetworking() {
+        guard retryTimer != nil else { return }   // not started
+        log("Restarting the relay's network services after wake.")
+        stopListener()
+        restartDelay = 2
+        preferredPortUnavailable = false
+        if !restartPending { startListener() }
+        stopBrowser()
+        startBrowser()
     }
 
     private func handle(_ connection: NWConnection) {
@@ -133,7 +202,8 @@ final class Relay {
                 Self.reply(#"{"ok":true}"#, on: connection); return
             }
             if object["fetch"] as? Bool == true {
-                self.answerFetch(on: connection, have: (object["have"] as? String).flatMap(Self.date(from:))); return
+                self.answerFetch(on: connection, have: (object["have"] as? String).flatMap(Self.date(from:)),
+                                 haveFilms: object["haveFilms"] as? [String]); return
             }
             guard object["films"] != nil, let date = Self.dispatchedAt(in: body) else {
                 Self.reply(#"{"ok":false,"error":"Not a queue payload"}"#, on: connection); return
@@ -145,14 +215,20 @@ final class Relay {
 
     /// Sends the held queue, then waits for ATVQ's {"ok":true}, so the log says whether it
     /// actually arrived rather than only that it was asked for.
-    private func answerFetch(on connection: NWConnection, have: Date?) {
-        let peer = Self.peerName(connection)
+    private func answerFetch(on connection: NWConnection, have: Date?, haveFilms: [String]?) {
+        let address = Self.peerName(connection)
+        let peer = peerNames[address] ?? address
         guard let held, let heldDispatchedAt else {
             Self.reply(#"{"ok":true}"#, on: connection); return
         }
         // ATVQ already has this queue (or a newer one): the usual poll, answered quietly.
         // A millisecond of slack: `have` has been through a date → text → date round trip.
-        if let have, heldDispatchedAt.timeIntervalSince(have) < 0.002 {
+        // The same timestamp with other films is a different queue (second-precision senders).
+        let sameTime = have.map { abs(heldDispatchedAt.timeIntervalSince($0)) < 0.002 } ?? false
+        let otherFilms = sameTime && Self.filmIDs(in: held).map { heldIDs in
+            haveFilms.map { $0.map { $0.uppercased() } != heldIDs } ?? false
+        } == true
+        if let have, heldDispatchedAt.timeIntervalSince(have) < 0.002, !otherFilms {
             if deliveries[peer] == nil, abs(heldDispatchedAt.timeIntervalSince(have)) < 0.002 { deliveries[peer] = Date() }
             Self.reply(#"{"ok":true}"#, on: connection); return
         }
@@ -183,6 +259,10 @@ final class Relay {
 
     private static func peerName(_ connection: NWConnection) -> String {
         guard case .hostPort(let host, _) = connection.endpoint else { return "\(connection.endpoint)" }
+        return address(of: host)
+    }
+
+    private static func address(of host: NWEndpoint.Host) -> String {
         let text = "\(host)"
         return text.split(separator: "%").first.map(String.init) ?? text   // drop IPv6 scope ID
     }
@@ -190,7 +270,10 @@ final class Relay {
     private func accept(_ body: Data, dispatchedAt date: Date) {
         // Older, or the identical queue again, is ignored; a different queue with the same
         // (second-precision) timestamp is accepted.
-        if let heldDispatchedAt, date < heldDispatchedAt || (date == heldDispatchedAt && body == held) {
+        // A held queue dated well in the future came from a wrong clock on the sender's Mac;
+        // honoring it would block every real queue (and stay saved) until time caught up.
+        let heldImplausible = heldDispatchedAt.map { $0 > Date().addingTimeInterval(Self.futureSlack) } ?? false
+        if let heldDispatchedAt, (date < heldDispatchedAt && !heldImplausible) || (date == heldDispatchedAt && body == held) {
             log("Relay ignored a queue no newer than the one held.")
             return
         }
@@ -221,16 +304,24 @@ final class Relay {
                 self.forwardToAll()
             }
         }
-        browser.stateUpdateHandler = { [weak self] state in
+        browser.stateUpdateHandler = { [weak self, weak browser] state in
             MainActor.assumeIsolated {
-                if case .failed = state {
-                    self?.browser = nil
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 10) { self?.startBrowser() }
+                guard case .failed = state, let self, self.browser === browser else { return }
+                self.stopBrowser()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                    if self?.browser == nil { self?.startBrowser() }
                 }
             }
         }
         browser.start(queue: .main)
         self.browser = browser
+    }
+
+    private func stopBrowser() {
+        browser?.stateUpdateHandler = nil
+        browser?.browseResultsChangedHandler = nil
+        browser?.cancel()
+        browser = nil
     }
 
     private func forwardToAll() {
@@ -255,6 +346,9 @@ final class Relay {
             finished = true
             connection.cancel()
             self.inFlight.remove(name)
+            // Replaced while this was in flight: forwardToAll skipped this target then, so
+            // send it the new queue now.
+            if self.held != body { self.forwardToAll(); return }
             // Only count it if the queue wasn't replaced while this was in flight.
             if ok, self.held == body {
                 self.delivered.insert(name)
@@ -262,6 +356,13 @@ final class Relay {
                 self.log("Relay delivered the queue to \(name).")
             } else if !ok {
                 self.log("Relay couldn't reach \(name) (\(detail)); will retry.")
+            }
+        }
+        connection.stateUpdateHandler = { [weak self] state in
+            MainActor.assumeIsolated {
+                guard case .ready = state, let remote = connection.currentPath?.remoteEndpoint,
+                      case .hostPort(let host, _) = remote else { return }
+                self?.peerNames[Self.address(of: host)] = name
             }
         }
         connection.start(queue: .main)
@@ -297,6 +398,14 @@ final class Relay {
         if let date = formatter.date(from: text) { return date }
         formatter.formatOptions.insert(.withFractionalSeconds)
         return formatter.date(from: text)
+    }
+
+    /// The films' IDs, uppercased (as ATVQ sends them); nil if any film has none, since ATVQ
+    /// then makes one up and the lists could never match.
+    private static func filmIDs(in body: Data) -> [String]? {
+        guard let films = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["films"] as? [[String: Any]] else { return nil }
+        let ids = films.compactMap { ($0["id"] as? String)?.uppercased() }
+        return ids.count == films.count ? ids : nil
     }
 
     private static func filmCount(in body: Data) -> Int {
