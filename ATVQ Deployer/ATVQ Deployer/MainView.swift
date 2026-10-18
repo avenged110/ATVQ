@@ -51,6 +51,9 @@ struct MainView: View {
                 TableRow("Queue relay") {
                     RelayStatus(relay: deployer.relay)
                 }
+                TableRow("Last delivered") {
+                    LastDeliveryStatus(relay: deployer.relay)
+                }
                 HStack {
                     Spacer()
                     Button("Open Logs") { NSWorkspace.shared.open(Storage.logsDirectory) }
@@ -353,13 +356,28 @@ private struct RelayStatus: View {
         // relay only through Bonjour.
         if relay.isListening && !relay.isAdvertised { return "Listening, but not advertised on the network" }
         guard let date = relay.heldDispatchedAt else {
-            guard relay.isListening else { return "Not listening" }
-            // Delivered queues are flushed; say where the last one went.
-            guard let last = relay.lastDelivered else { return "Listening, no queue held" }
-            return "Listening, no queue held; last delivered \(last.filmCount) film(s) to \(last.to) on "
-                + last.at.formatted(date: .abbreviated, time: .shortened)
+            return relay.isListening ? "Listening, no queue held" : "Not listening"
         }
-        return "Holding \(relay.filmCount) film(s) from \(date.formatted(date: .abbreviated, time: .shortened)), not yet delivered"
+        return "Holding \(relay.filmCount) film(s) from \(date.formatted(date: .abbreviated, time: .shortened))"
+    }
+}
+
+/// When the relay last handed a queue off (it's flushed once delivered).
+private struct LastDeliveryStatus: View {
+    let relay: Relay
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(summary)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+            StatusGlyph(systemName: "shippingbox.fill", color: relay.lastDelivered == nil ? .secondary : .green)
+        }
+    }
+
+    private var summary: String {
+        guard let last = relay.lastDelivered else { return "Nothing delivered yet" }
+        return "\(last.filmCount) film(s) to \(last.to), \(last.at.formatted(date: .abbreviated, time: .shortened))"
     }
 }
 

@@ -211,6 +211,11 @@ struct InstructionsCard: View {
         "Select the \u{201C}Dispatch to ATVQ\u{201D} button and your films should appear here.",
     ]
 
+    /// tvOS's dark-mode background gray (the color of its own alerts and cards).
+    private static let cardColor = Color(white: 0.17)
+    /// Two points under .caption2.
+    private static let versionFontSize = UIFont.preferredFont(forTextStyle: .caption2).pointSize - 2
+
     /// "1.0.0.29": the marketing version plus the build number.
     private static let version: String = {
         let info = Bundle.main.infoDictionary
@@ -240,12 +245,19 @@ struct InstructionsCard: View {
         }
         .padding(64)
         .frame(width: 1100, alignment: .leading)
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .bottomTrailing) {
+            // Deliberately all but invisible.
             Text("Version \(Self.version)")
-                .font(.caption2)
+                .font(.system(size: Self.versionFontSize))
                 .foregroundStyle(.quaternary)
+                .opacity(0.5)
                 .padding(32)
         }
-        .background(RoundedRectangle(cornerRadius: 40, style: .continuous).fill(.regularMaterial))
+        .background {
+            // Solid, like tvOS's own cards, with the metadata pane's subtle drop shadow.
+            RoundedRectangle(cornerRadius: 40, style: .continuous)
+                .fill(Self.cardColor)
+                .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+        }
     }
 }

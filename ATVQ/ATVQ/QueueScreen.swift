@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The populated state: eight-slot film list on the left, metadata pane on the right.
 
+import CoreImage
 import SwiftUI
 import os
 
@@ -22,6 +23,9 @@ struct QueueScreen: View {
     @FocusState private var focus: FocusTarget?
     @State private var selected = 0
     @State private var showsInstructions = false
+    /// A small, pre-blurred snapshot of `content`, taken as the overlay opens (see blurredSnapshot).
+    @State private var snapshot: UIImage?
+    @State private var contentSize: CGSize = .zero
     /// Long-press Select on any row toggles a duration line under every title (and the
     /// pane's duration row, in sync).
     @State private var durationsLaidOut = false
@@ -34,17 +38,23 @@ struct QueueScreen: View {
 
     var body: some View {
         ZStack {
+            // The blur is a still: `content` is rendered once, small, and blurred on the CPU as the
+            // overlay opens, then crossfaded with the live view. Only opacities animate; nothing
+            // is re-blurred per frame (an animated blur radius on the live tree stuttered, and a
+            // system material tints the screen rather than just blurring it).
             content
                 .disabled(showsInstructions)
-            // A system material fading in over the screen rather than an animated blur radius
-            // on `content`: animating the radius re-blurs the whole view tree on every frame,
-            // which stuttered as the overlay opened. The material is a fixed-radius GPU blur,
-            // so only its opacity animates.
+                .opacity(showsInstructions && snapshot != nil ? 0 : 1)
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { contentSize = $0 }
+                .overlay {
+                    if showsInstructions, let snapshot {
+                        Image(uiImage: snapshot)
+                            .interpolation(.high)
+                            .resizable()
+                            .transition(.opacity)
+                    }
+                }
             if showsInstructions {
-                Rectangle()
-                    .fill(.thinMaterial)
-                    .ignoresSafeArea()
-                    .transition(.opacity)
                 InstructionsOverlay { setInstructions(false) }
                     .transition(ScaleTransition(1.12, anchor: .center).combined(with: OpacityTransition()))
                     .zIndex(1)
@@ -72,9 +82,25 @@ struct QueueScreen: View {
 
     private func setInstructions(_ shown: Bool) {
         guard shown != showsInstructions else { return }
-        if shown { focusBeforeOverlay = focus }
+        if shown {
+            focusBeforeOverlay = focus
+            snapshot = blurredSnapshot()
+        }
         withAnimation(.smooth(duration: 0.45)) { showsInstructions = shown }
         if !shown { focus = focusBeforeOverlay ?? .row(selected) }
+    }
+
+    /// `content` at a tenth of its size, Gaussian-blurred: drawn back at full size, the
+    /// upscaling smooths it further, so the result reads as a heavy blur for almost no cost.
+    @MainActor private func blurredSnapshot() -> UIImage? {
+        guard contentSize.width > 0, contentSize.height > 0 else { return nil }
+        let renderer = ImageRenderer(content: content.environment(store).frame(width: contentSize.width, height: contentSize.height))
+        renderer.scale = 0.1
+        guard let cgImage = renderer.cgImage else { return nil }
+        let input = CIImage(cgImage: cgImage)
+        let blurred = input.clampedToExtent().applyingGaussianBlur(sigma: 4).cropped(to: input.extent)
+        guard let output = CIContext().createCGImage(blurred, from: input.extent) else { return nil }
+        return UIImage(cgImage: output)
     }
 
     private var content: some View {
