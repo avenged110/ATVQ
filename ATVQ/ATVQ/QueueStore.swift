@@ -23,6 +23,24 @@ final class QueueStore {
     /// empty-state instructions before the queue appears.
     private(set) var isReady = false
 
+    /// Checking the relay for a newer queue (on launch and on returning to the foreground),
+    /// or decoding one that just arrived. Drives the "Refreshing…" byline.
+    var isRefreshing: Bool { isCheckingRelay || decoding > 0 }
+    /// The relay couldn't be reached within RelayClient's grace period.
+    private(set) var refreshFailed = false
+    private var isCheckingRelay = false
+    private var decoding = 0
+
+    func refreshStarted() {
+        isCheckingRelay = true
+        refreshFailed = false
+    }
+
+    func refreshFinished(reachedRelay: Bool) {
+        isCheckingRelay = false
+        refreshFailed = !reachedRelay
+    }
+
     /// Bumped per apply so a slow decode can't overwrite a newer queue.
     private var generation = 0
     /// Newest dispatch accepted so far. The same queue can arrive twice (directly from
@@ -63,7 +81,13 @@ final class QueueStore {
     }
 
     func apply(_ newPayload: QueuePayload, persist: Bool = true) {
-        Task { await applyNow(newPayload, persist: persist) }
+        // Counted from now, not from when the task starts, so the byline never blinks idle
+        // between the relay's answer and the decode.
+        decoding += 1
+        Task {
+            await applyNow(newPayload, persist: persist)
+            decoding -= 1
+        }
     }
 
     /// Like apply(), but returns once the queue is decoded and published.
@@ -78,6 +102,7 @@ final class QueueStore {
         newestFilmIDs = filmIDs
         generation += 1
         let current = generation
+
         var trimmed = newPayload
         trimmed.films = Array(newPayload.films.prefix(QueuePayload.maxFilms))
         let films = trimmed.films   // with poster bytes, for decoding

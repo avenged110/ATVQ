@@ -41,12 +41,25 @@ final class RelayClient {
     private var answeredSinceActivation = false
     private var have: () -> (date: Date, filmIDs: [UUID])? = { nil }
     private var onPayload: ((QueuePayload) -> Void)?
+    /// Reports whether the first check after activation reached the relay (true), or gave up
+    /// after `checkGrace` (false). Polling carries on either way.
+    private var onChecked: ((Bool) -> Void)?
+    private static let checkGrace: TimeInterval = 45
 
     /// Starts (or restarts, on returning to the foreground) browsing and polling.
-    func start(have: @escaping () -> (date: Date, filmIDs: [UUID])?, onPayload: @escaping (QueuePayload) -> Void) {
+    func start(have: @escaping () -> (date: Date, filmIDs: [UUID])?, onPayload: @escaping (QueuePayload) -> Void,
+               onChecked: @escaping (Bool) -> Void) {
         self.have = have
         self.onPayload = onPayload
         stop()
+        self.onChecked = onChecked
+        let session = self.session
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.checkGrace) { [weak self] in
+            guard let self, self.session == session, !self.answeredSinceActivation else { return }
+            Log.relay.info("No answer from a relay yet; still trying.")
+            self.onChecked?(false)
+            self.onChecked = nil
+        }
         Log.relay.info("Activated; looking for the relay.")
         answeredSinceActivation = false
         startBrowser()
@@ -142,6 +155,10 @@ final class RelayClient {
             if answered, !self.answeredSinceActivation {
                 self.answeredSinceActivation = true
                 self.scheduleNext()
+            }
+            if answered, let onChecked = self.onChecked {
+                self.onChecked = nil
+                onChecked(true)
             }
         }
         connection.stateUpdateHandler = { state in

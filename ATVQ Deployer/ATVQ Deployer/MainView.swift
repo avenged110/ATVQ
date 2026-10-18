@@ -37,7 +37,7 @@ struct MainView: View {
 
     private var cards: some View {
         VStack(alignment: .leading, spacing: 16) {
-            TableSection("Status") {
+            TableSection("Status", footer: "The queue relay holds a dispatched queue only until an Apple TV confirms it has it, then clears it. With more than one Apple TV running ATVQ, only the first to receive the queue gets it from the relay; the others need FilmTracker to dispatch to them directly.") {
                 TableRow("Provisioning profile") {
                     HStack(spacing: 6) {
                         if deployer.isRunning { ProgressView().controlSize(.small) }
@@ -191,10 +191,12 @@ private final class XcodeProjectFilter: NSObject, NSOpenSavePanelDelegate {
 /// A titled card of rows divided by separators.
 private struct TableSection<Content: View>: View {
     let title: String
+    let footer: String?
     let content: Content
 
-    init(_ title: String, @ViewBuilder content: () -> Content) {
+    init(_ title: String, footer: String? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
+        self.footer = footer
         self.content = content()
     }
 
@@ -213,6 +215,13 @@ private struct TableSection<Content: View>: View {
                 }
             }
             .cardChrome()
+            if let footer {
+                Text(footer)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+            }
         }
     }
 }
@@ -344,13 +353,13 @@ private struct RelayStatus: View {
         // relay only through Bonjour.
         if relay.isListening && !relay.isAdvertised { return "Listening, but not advertised on the network" }
         guard let date = relay.heldDispatchedAt else {
-            return relay.isListening ? "Listening, no queue held" : "Not listening"
+            guard relay.isListening else { return "Not listening" }
+            // Delivered queues are flushed; say where the last one went.
+            guard let last = relay.lastDelivered else { return "Listening, no queue held" }
+            return "Listening, no queue held; last delivered \(last.filmCount) film(s) to \(last.to) on "
+                + last.at.formatted(date: .abbreviated, time: .shortened)
         }
-        let held = "Holding \(relay.filmCount) film(s) from \(date.formatted(date: .abbreviated, time: .shortened))"
-        guard !relay.deliveries.isEmpty else { return held + ", not yet delivered" }
-        let names = relay.deliveries.sorted { $0.value > $1.value }
-            .map { "\($0.key) at \($0.value.formatted(date: .omitted, time: .shortened))" }
-        return held + ", delivered to " + names.joined(separator: ", ")
+        return "Holding \(relay.filmCount) film(s) from \(date.formatted(date: .abbreviated, time: .shortened)), not yet delivered"
     }
 }
 

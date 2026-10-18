@@ -138,6 +138,7 @@ struct Backdrop: View {
 }
 
 struct ClockHeader: View {
+    @Environment(QueueStore.self) private var store
     let dispatchedAt: Date?
 
     var body: some View {
@@ -152,13 +153,41 @@ struct ClockHeader: View {
                         .foregroundStyle(.tertiary)
                 }
                 .font(.title3.weight(.semibold))
-                if let dispatchedAt {
-                    Text("Dispatched from Film Tracker \(Self.relative(dispatchedAt, now: context.date)).")
-                        .font(.callout)
-                        .foregroundStyle(.tertiary)
+                // "Last dispatched today at 12:59 PM. Refreshing… ◌". Every piece is keyed by its
+                // text, so any change crossfades (old fades out, new fades in) rather than snapping.
+                let dispatched = dispatchedAt.map { "Last dispatched \(Self.relative($0, now: context.date))." }
+                let status = statusText
+                HStack(alignment: .center, spacing: 12) {
+                    if let dispatched {
+                        Text(dispatched)
+                            .id(dispatched)
+                            .transition(.opacity)
+                    }
+                    if let status {
+                        Text(status)
+                            .id(status)
+                            .transition(.opacity)
+                    }
+                    if store.isRefreshing {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 30, height: 30)
+                            .transition(.opacity)
+                    }
                 }
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .animation(.easeInOut(duration: 0.4), value: dispatched)
+                .animation(.easeInOut(duration: 0.4), value: status)
+                .animation(.easeInOut(duration: 0.4), value: store.isRefreshing)
             }
         }
+    }
+
+    private var statusText: String? {
+        if store.isRefreshing { return dispatchedAt == nil ? "Checking for a queue\u{2026}" : "Refreshing\u{2026}" }
+        if store.refreshFailed { return "Couldn\u{2019}t reach ATVQ Deployer; still trying." }
+        return nil
     }
 
     private static func relative(_ date: Date, now: Date) -> String {
@@ -182,6 +211,14 @@ struct InstructionsCard: View {
         "Select the \u{201C}Dispatch to ATVQ\u{201D} button and your films should appear here.",
     ]
 
+    /// "1.0.0.29": the marketing version plus the build number.
+    private static let version: String = {
+        let info = Bundle.main.infoDictionary
+        let marketing = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(marketing).\(build)"
+    }()
+
     var body: some View {
         VStack(alignment: .leading, spacing: 44) {
             Label("Send Your Queue to Apple TV", systemImage: "appletv.fill")
@@ -203,6 +240,12 @@ struct InstructionsCard: View {
         }
         .padding(64)
         .frame(width: 1100, alignment: .leading)
+        .overlay(alignment: .topTrailing) {
+            Text("Version \(Self.version)")
+                .font(.caption2)
+                .foregroundStyle(.quaternary)
+                .padding(32)
+        }
         .background(RoundedRectangle(cornerRadius: 40, style: .continuous).fill(.regularMaterial))
     }
 }

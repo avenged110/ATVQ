@@ -25,7 +25,10 @@ import Observation
 final class Relay {
     private(set) var heldDispatchedAt: Date?
     private(set) var filmCount = 0
-    private(set) var deliveries: [String: Date] = [:]   // ATVQ instance name → time delivered
+    /// The last queue handed off and then flushed (see flush): kept, without its bytes, so the
+    /// status row can say where it went and an older or repeated dispatch isn't held again.
+    private(set) var lastDelivered: (date: Date, filmCount: Int, to: String, at: Date)?
+    @ObservationIgnored private var lastDeliveredFilmIDs: [String]?
     private(set) var isListening = false
     /// Bonjour actually published `_atvqrelay._tcp` (see startListener).
     private(set) var isAdvertised = false
@@ -35,7 +38,6 @@ final class Relay {
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var targets: [String: NWEndpoint] = [:]
-    private var delivered: Set<String> = []             // instance names holding the current queue
     private var inFlight: Set<String> = []
     private var retryTimer: Timer?
     private var restartDelay: TimeInterval = 2
@@ -61,6 +63,7 @@ final class Relay {
     private static let pushWindow: TimeInterval = 10 * 60
 
     private static var fileURL: URL { Storage.directory.appendingPathComponent("relay-payload.json") }
+    private static let lastDeliveredKey = "RelayLastDelivered"
     /// Lab use only (`defaults write app.ATVQDeployer RelayLoopback -bool YES`): forces
     /// forwarding over loopback so the tvOS Simulator on this Mac is reachable.
     private var loopbackOnly: Bool { UserDefaults.standard.bool(forKey: "RelayLoopback") }
@@ -71,6 +74,11 @@ final class Relay {
             held = data
             heldDispatchedAt = date
             filmCount = Self.filmCount(in: data)
+        }
+        if let saved = UserDefaults.standard.dictionary(forKey: Self.lastDeliveredKey),
+           let date = saved["date"] as? Date, let at = saved["at"] as? Date {
+            lastDelivered = (date, saved["filmCount"] as? Int ?? 0, saved["to"] as? String ?? "ATVQ", at)
+            lastDeliveredFilmIDs = saved["filmIDs"] as? [String]
         }
         startListener()
         startBrowser()
@@ -229,8 +237,11 @@ final class Relay {
             haveFilms.map { $0.map { $0.uppercased() } != heldIDs } ?? false
         } == true
         if let have, heldDispatchedAt.timeIntervalSince(have) < 0.002, !otherFilms {
-            if deliveries[peer] == nil, abs(heldDispatchedAt.timeIntervalSince(have)) < 0.002 { deliveries[peer] = Date() }
-            Self.reply(#"{"ok":true}"#, on: connection); return
+            Self.reply(#"{"ok":true}"#, on: connection)
+            // ATVQ has it (FilmTracker reached it directly, say): nothing left to hold for.
+            log("ATVQ (\(peer)) already has the held queue.")
+            flush(deliveredTo: peer)
+            return
         }
         let size = ByteCountFormatter.string(fromByteCount: Int64(held.count), countStyle: .file)
         let dated = heldDispatchedAt.formatted(date: .abbreviated, time: .shortened)
@@ -246,7 +257,7 @@ final class Relay {
             let object = reply.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             if object?["ok"] as? Bool == true {
                 self.log("ATVQ (\(peer)) confirmed it received the queue.")
-                if self.held == held { self.deliveries[peer] = Date() }
+                if self.held == held { self.flush(deliveredTo: peer) }
             } else if let error = object?["error"] as? String {
                 self.log("ATVQ (\(peer)) rejected the queue: \(error)")
             } else {
@@ -277,15 +288,37 @@ final class Relay {
             log("Relay ignored a queue no newer than the one held.")
             return
         }
+        // Likewise against the queue already delivered and flushed: ATVQ would ignore it anyway.
+        if heldDispatchedAt == nil, let last = lastDelivered, last.date <= Date().addingTimeInterval(Self.futureSlack),
+           date < last.date || (date == last.date && Self.filmIDs(in: body) == lastDeliveredFilmIDs) {
+            log("Relay ignored a queue no newer than the one already delivered.")
+            return
+        }
         held = body
         heldDispatchedAt = date
         filmCount = Self.filmCount(in: body)
-        delivered.removeAll()
-        deliveries.removeAll()
         try? body.write(to: Self.fileURL, options: .atomic)
         pushUntil = Date().addingTimeInterval(Self.pushWindow)
         log("Relay received a queue of \(filmCount) film(s); forwarding.")
         forwardToAll()
+    }
+
+    /// ATVQ confirmed it has the held queue, so the relay's job is done: drop the payload (and
+    /// its file) rather than hold it indefinitely, remembering only what went where.
+    private func flush(deliveredTo name: String) {
+        guard let held, let heldDispatchedAt else { return }
+        let ids = Self.filmIDs(in: held)
+        lastDelivered = (heldDispatchedAt, filmCount, name, Date())
+        lastDeliveredFilmIDs = ids
+        var saved: [String: Any] = ["date": heldDispatchedAt, "filmCount": filmCount, "to": name, "at": Date()]
+        if let ids { saved["filmIDs"] = ids }
+        UserDefaults.standard.set(saved, forKey: Self.lastDeliveredKey)
+        self.held = nil
+        self.heldDispatchedAt = nil
+        filmCount = 0
+        pushUntil = nil
+        try? FileManager.default.removeItem(at: Self.fileURL)
+        log("Relay flushed the delivered queue.")
     }
 
     // MARK: Forwarding to ATVQ
@@ -300,7 +333,6 @@ final class Relay {
                     return (name, result.endpoint)
                 }, uniquingKeysWith: { first, _ in first })
                 // An ATVQ that (re)appears — e.g. the Apple TV woke — gets the queue right away.
-                self.delivered.formIntersection(self.targets.keys)
                 self.forwardToAll()
             }
         }
@@ -326,7 +358,7 @@ final class Relay {
 
     private func forwardToAll() {
         guard let held, let pushUntil, Date() < pushUntil else { return }
-        for (name, endpoint) in targets where !delivered.contains(name) && !inFlight.contains(name) {
+        for (name, endpoint) in targets where !inFlight.contains(name) {
             forward(held, to: name, endpoint: endpoint)
         }
     }
@@ -351,9 +383,8 @@ final class Relay {
             if self.held != body { self.forwardToAll(); return }
             // Only count it if the queue wasn't replaced while this was in flight.
             if ok, self.held == body {
-                self.delivered.insert(name)
-                self.deliveries[name] = Date()
                 self.log("Relay delivered the queue to \(name).")
+                self.flush(deliveredTo: name)
             } else if !ok {
                 self.log("Relay couldn't reach \(name) (\(detail)); will retry.")
             }
