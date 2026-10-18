@@ -9,8 +9,11 @@
 //
 // Frames are a 4-byte big-endian length then JSON — the same protocol ATVQ speaks:
 //   {"version":…, "dispatchedAt":…, "films":[…]}  → store, reply {"ok":true}
-//   {"fetch":true}                                 → reply with the held payload (or {"ok":true});
+//   {"fetch":true, "have":…}                       → reply with the held payload if it's newer than
+//                                                    `have` (ATVQ's newest), else {"ok":true};
 //                                                    ATVQ then answers {"ok":true} once it has decoded it
+// ATVQ polls with fetch every few seconds while it's on screen, so that is the dependable
+// path; pushes only make a dispatch show up a little sooner.
 //   {"ping":true}                                  → reply {"ok":true}, store nothing (FilmTracker's self-test)
 
 import Foundation
@@ -130,7 +133,7 @@ final class Relay {
                 Self.reply(#"{"ok":true}"#, on: connection); return
             }
             if object["fetch"] as? Bool == true {
-                self.answerFetch(on: connection); return
+                self.answerFetch(on: connection, have: (object["have"] as? String).flatMap(Self.date(from:))); return
             }
             guard object["films"] != nil, let date = Self.dispatchedAt(in: body) else {
                 Self.reply(#"{"ok":false,"error":"Not a queue payload"}"#, on: connection); return
@@ -142,10 +145,15 @@ final class Relay {
 
     /// Sends the held queue, then waits for ATVQ's {"ok":true}, so the log says whether it
     /// actually arrived rather than only that it was asked for.
-    private func answerFetch(on connection: NWConnection) {
+    private func answerFetch(on connection: NWConnection, have: Date?) {
         let peer = Self.peerName(connection)
         guard let held, let heldDispatchedAt else {
-            log("ATVQ (\(peer)) asked for the latest queue; none held.")
+            Self.reply(#"{"ok":true}"#, on: connection); return
+        }
+        // ATVQ already has this queue (or a newer one): the usual poll, answered quietly.
+        // A millisecond of slack: `have` has been through a date → text → date round trip.
+        if let have, heldDispatchedAt.timeIntervalSince(have) < 0.002 {
+            if deliveries[peer] == nil, abs(heldDispatchedAt.timeIntervalSince(have)) < 0.002 { deliveries[peer] = Date() }
             Self.reply(#"{"ok":true}"#, on: connection); return
         }
         let size = ByteCountFormatter.string(fromByteCount: Int64(held.count), countStyle: .file)
@@ -257,6 +265,11 @@ final class Relay {
             }
         }
         connection.start(queue: .main)
+        // A Bonjour endpoint that can't be connected to can sit in `.preparing` indefinitely
+        // without reporting a failure; don't let it hold this target for the full timeout.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            if connection.state != .ready { finish(false, "couldn't connect") }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 120) { finish(false, "timed out") }
         connection.send(content: Frames.frame(body), completion: .contentProcessed { error in
             if let error { MainActor.assumeIsolated { finish(false, "\(error)") } }
@@ -276,6 +289,10 @@ final class Relay {
     private static func dispatchedAt(in body: Data) -> Date? {
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               let text = object["dispatchedAt"] as? String else { return nil }
+        return date(from: text)
+    }
+
+    private static func date(from text: String) -> Date? {
         let formatter = ISO8601DateFormatter()
         if let date = formatter.date(from: text) { return date }
         formatter.formatOptions.insert(.withFractionalSeconds)

@@ -44,12 +44,12 @@ enum Tools {
                                     kSecMatchLimit as String: kSecMatchLimitAll,
                                     kSecReturnRef as String: true]
         var items: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
+        guard unsafe SecItemCopyMatching(query as CFDictionary, &items) == errSecSuccess,
               let identities = items as? [SecIdentity] else { return [] }
         var teams: [String] = []
         for identity in identities {
             var certificate: SecCertificate?
-            guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess, let certificate,
+            guard unsafe SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess, let certificate,
                   let summary = SecCertificateCopySubjectSummary(certificate) as String?,
                   summary.hasPrefix("Apple Development"),
                   let values = SecCertificateCopyValues(certificate, [kSecOIDX509V1SubjectName] as CFArray, nil) as? [String: Any],

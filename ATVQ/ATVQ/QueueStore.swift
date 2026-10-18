@@ -26,8 +26,9 @@ final class QueueStore {
     /// Bumped per apply so a slow decode can't overwrite a newer queue.
     private var generation = 0
     /// Newest dispatch accepted so far. The same queue can arrive twice (directly from
-    /// FilmTracker and again via the relay), and a relay may hold an older one.
-    private var newestDispatch: Date?
+    /// FilmTracker and again via the relay), and a relay may hold an older one. RelayClient
+    /// sends it with each poll so the relay only answers with something newer.
+    @ObservationIgnored private(set) var newestDispatch: Date?
     /// Film IDs of that dispatch: an equal timestamp with different films is a genuinely new
     /// dispatch (second-precision senders), while equal films is a duplicate.
     private var newestFilmIDs: [UUID] = []

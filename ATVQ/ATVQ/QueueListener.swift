@@ -45,17 +45,23 @@ final class QueueListener {
         self.listener = listener
     }
 
-    /// Called when the app returns to the foreground: tvOS may have torn the listener down
-    /// while suspended without reporting a failure.
-    func ensureRunning() {
+    /// Called whenever the app returns to the foreground. Always starts over: while ATVQ
+    /// was suspended, tvOS may have reclaimed the listening socket and withdrawn the Bonjour
+    /// advertisement without the listener ever leaving `.ready`, which left ATVQ open on
+    /// screen but unreachable.
+    func restart() {
         guard onReceive != nil else { return }
-        if let state = listener?.state, case .ready = state { return }
-        if listener?.state == .setup { return }
-        listener?.stateUpdateHandler = nil
-        listener?.cancel()
-        listener = nil
+        stop()
         retryDelay = 1
         startListener()
+    }
+
+    /// Called when the app leaves the foreground.
+    func stop() {
+        listener?.stateUpdateHandler = nil
+        listener?.newConnectionHandler = nil
+        listener?.cancel()
+        listener = nil
     }
 
     private var restartPending = false
@@ -70,7 +76,7 @@ final class QueueListener {
         retryDelay = min(retryDelay * 2, 60)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.restartPending = false
-            self?.startListener()   // no-op if ensureRunning() already restarted it
+            self?.startListener()   // no-op if restart() already restarted it
         }
     }
 

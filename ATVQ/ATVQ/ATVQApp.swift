@@ -1,7 +1,8 @@
 // MARK: - ATVQApp.swift
 // Copyright © 2026 avenged110.
 // SPDX-License-Identifier: GPL-3.0-only
-// App entry point. Owns the queue store and starts the network listener.
+// App entry point. Owns the queue store, the listener for direct dispatches, and the
+// relay poller; both networking pieces run only while ATVQ is in the foreground.
 
 import SwiftUI
 
@@ -19,15 +20,22 @@ struct ATVQApp: App {
                 .preferredColorScheme(.dark)
                 .onAppear {
                     listener.start { payload in store.apply(payload) }
-                    relay.fetch { payload in store.apply(payload) }
+                    relay.start(have: { store.newestDispatch }, onPayload: { payload in store.apply(payload) })
                     #if DEBUG
                     if ProcessInfo.processInfo.arguments.contains("-ATVQSample") { store.apply(SampleData.payload(), persist: false) }
                     #endif
                 }
                 .onChange(of: scenePhase) { _, phase in
-                    guard phase == .active else { return }
-                    listener.ensureRunning()
-                    relay.fetch { payload in store.apply(payload) }
+                    switch phase {
+                    case .active:
+                        listener.restart()
+                        relay.start(have: { store.newestDispatch }, onPayload: { payload in store.apply(payload) })
+                    case .background:
+                        listener.stop()
+                        relay.stop()
+                    default:
+                        break
+                    }
                 }
         }
     }
