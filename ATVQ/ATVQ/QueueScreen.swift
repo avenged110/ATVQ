@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The populated state: eight-slot film list on the left, metadata pane on the right.
 
-import CoreImage
 import SwiftUI
 import os
 
@@ -23,9 +22,6 @@ struct QueueScreen: View {
     @FocusState private var focus: FocusTarget?
     @State private var selected = 0
     @State private var showsInstructions = false
-    /// A small, pre-blurred snapshot of `content`, taken as the overlay opens (see blurredSnapshot).
-    @State private var snapshot: UIImage?
-    @State private var contentSize: CGSize = .zero
     /// Long-press Select on any row toggles a duration line under every title (and the
     /// pane's duration row, in sync).
     @State private var durationsLaidOut = false
@@ -38,22 +34,15 @@ struct QueueScreen: View {
 
     var body: some View {
         ZStack {
-            // The blur is a still: `content` is rendered once, small, and blurred on the CPU as the
-            // overlay opens, then crossfaded with the live view. Only opacities animate; nothing
-            // is re-blurred per frame (an animated blur radius on the live tree stuttered, and a
-            // system material tints the screen rather than just blurring it).
             content
                 .disabled(showsInstructions)
-                .opacity(showsInstructions && snapshot != nil ? 0 : 1)
-                .onGeometryChange(for: CGSize.self) { $0.size } action: { contentSize = $0 }
-                .overlay {
-                    if showsInstructions, let snapshot {
-                        Image(uiImage: snapshot)
-                            .interpolation(.high)
-                            .resizable()
-                            .transition(.opacity)
-                    }
-                }
+            // The system's own blur (what tvOS alerts use), animated the way UIKit intends: by
+            // animating its effect in and out, which the render server interpolates on the GPU.
+            // Nothing in SwiftUI's tree is re-rendered per frame, unlike an animated `.blur`
+            // radius, and unlike fading a material's opacity the blur deepens smoothly.
+            SystemBlur(isShown: showsInstructions, duration: Self.overlayDuration)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
             if showsInstructions {
                 InstructionsOverlay { setInstructions(false) }
                     .transition(ScaleTransition(1.12, anchor: .center).combined(with: OpacityTransition()))
@@ -82,26 +71,12 @@ struct QueueScreen: View {
 
     private func setInstructions(_ shown: Bool) {
         guard shown != showsInstructions else { return }
-        if shown {
-            focusBeforeOverlay = focus
-            snapshot = blurredSnapshot()
-        }
-        withAnimation(.smooth(duration: 0.45)) { showsInstructions = shown }
+        if shown { focusBeforeOverlay = focus }
+        withAnimation(.smooth(duration: Self.overlayDuration)) { showsInstructions = shown }
         if !shown { focus = focusBeforeOverlay ?? .row(selected) }
     }
 
-    /// `content` at a tenth of its size, Gaussian-blurred: drawn back at full size, the
-    /// upscaling smooths it further, so the result reads as a heavy blur for almost no cost.
-    @MainActor private func blurredSnapshot() -> UIImage? {
-        guard contentSize.width > 0, contentSize.height > 0 else { return nil }
-        let renderer = ImageRenderer(content: content.environment(store).frame(width: contentSize.width, height: contentSize.height))
-        renderer.scale = 0.1
-        guard let cgImage = renderer.cgImage else { return nil }
-        let input = CIImage(cgImage: cgImage)
-        let blurred = input.clampedToExtent().applyingGaussianBlur(sigma: 4).cropped(to: input.extent)
-        guard let output = CIContext().createCGImage(blurred, from: input.extent) else { return nil }
-        return UIImage(cgImage: output)
-    }
+    private static let overlayDuration = 0.45
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 40) {
@@ -337,6 +312,33 @@ struct OuterShadow: View {
 
 // MARK: - Instructions overlay
 
+/// A UIVisualEffectView whose blur animates in and out with `isShown`. Its own dark tint is
+/// deepened a little further so the card stands out.
+private struct SystemBlur: UIViewRepresentable {
+    let isShown: Bool
+    let duration: Double
+
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        let view = UIVisualEffectView(effect: nil)
+        let dim = UIView()
+        dim.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        dim.alpha = 0
+        dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        dim.frame = view.contentView.bounds
+        view.contentView.addSubview(dim)
+        return view
+    }
+
+    func updateUIView(_ view: UIVisualEffectView, context: Context) {
+        let effect: UIVisualEffect? = isShown ? UIBlurEffect(style: .dark) : nil
+        guard (view.effect == nil) == isShown else { return }
+        UIView.animate(withDuration: duration, delay: 0, options: [.curveEaseInOut, .beginFromCurrentState]) {
+            view.effect = effect
+            view.contentView.subviews.first?.alpha = isShown ? 1 : 0
+        }
+    }
+}
+
 /// Full-screen overlay: the screen behind blurs while the card settles from slightly
 /// enlarged into place (and reverses on dismissal), like tvOS system alerts.
 private struct InstructionsOverlay: View {
@@ -352,7 +354,6 @@ private struct InstructionsOverlay: View {
                 .focused($closeFocused)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.25).ignoresSafeArea())
         .onAppear { closeFocused = true }
     }
 }

@@ -23,22 +23,43 @@ final class QueueStore {
     /// empty-state instructions before the queue appears.
     private(set) var isReady = false
 
-    /// Checking the relay for a newer queue (on launch and on returning to the foreground),
-    /// or decoding one that just arrived. Drives the "Refreshing…" byline.
-    var isRefreshing: Bool { isCheckingRelay || decoding > 0 }
-    /// The relay couldn't be reached within RelayClient's grace period.
-    private(set) var refreshFailed = false
-    private var isCheckingRelay = false
+    /// What the byline says about fetching (see ClockHeader).
+    enum RefreshState: Equatable {
+        case idle
+        /// Asking the relay for a newer queue, on launch and on returning to the foreground.
+        case checking
+        /// A newer queue just arrived and is on screen; shown briefly.
+        case updated
+        /// The relay answered and had nothing newer; shown briefly.
+        case upToDate
+        /// The relay couldn't be reached within RelayClient's grace period (polling goes on).
+        case unreachable
+    }
+    private(set) var refresh: RefreshState = .idle
+    /// A queue that just arrived is being decoded.
+    var isDecoding: Bool { decoding > 0 }
     private var decoding = 0
+    private var refreshGeneration = 0
 
-    func refreshStarted() {
-        isCheckingRelay = true
-        refreshFailed = false
+    func refreshStarted() { setRefresh(.checking) }
+
+    /// The relay answered (or didn't, in time). Ignored once a newer queue has already arrived,
+    /// since by then there's nothing left to check for.
+    func refreshFinished(reachedRelay: Bool) {
+        guard refresh == .checking else { return }
+        setRefresh(reachedRelay ? .upToDate : .unreachable)
     }
 
-    func refreshFinished(reachedRelay: Bool) {
-        isCheckingRelay = false
-        refreshFailed = !reachedRelay
+    private func setRefresh(_ state: RefreshState) {
+        refreshGeneration += 1
+        refresh = state
+        // The outcomes are a confirmation, not a status: they fade after a few seconds.
+        guard state == .updated || state == .upToDate else { return }
+        let generation = refreshGeneration
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(state == .updated ? 6 : 4))
+            if refreshGeneration == generation { refresh = .idle }
+        }
     }
 
     /// Bumped per apply so a slow decode can't overwrite a newer queue.
@@ -123,6 +144,8 @@ final class QueueStore {
         thumbnails = images.thumbnails
         backdrops = images.backdrops
         payload = shown.films.isEmpty ? nil : shown
+        // The saved queue loading at launch isn't news; anything after that is.
+        if isReady { setRefresh(.updated) }
     }
 
     private nonisolated static func decode(_ films: [QueueFilm])

@@ -168,7 +168,7 @@ struct ClockHeader: View {
                             .id(status)
                             .transition(.opacity)
                     }
-                    if store.isRefreshing {
+                    if showsSpinner {
                         ProgressView()
                             .scaleEffect(0.5)
                             .frame(width: 30, height: 30)
@@ -179,15 +179,23 @@ struct ClockHeader: View {
                 .foregroundStyle(.tertiary)
                 .animation(.easeInOut(duration: 0.4), value: dispatched)
                 .animation(.easeInOut(duration: 0.4), value: status)
-                .animation(.easeInOut(duration: 0.4), value: store.isRefreshing)
+                .animation(.easeInOut(duration: 0.4), value: showsSpinner)
             }
         }
     }
 
+    private var showsSpinner: Bool { store.isDecoding || store.refresh == .checking }
+
     private var statusText: String? {
-        if store.isRefreshing { return dispatchedAt == nil ? "Checking for a queue\u{2026}" : "Refreshing\u{2026}" }
-        if store.refreshFailed { return "Couldn\u{2019}t reach ATVQ Deployer; still trying." }
-        return nil
+        // A queue that has arrived but isn't on screen yet is still part of refreshing.
+        if store.isDecoding { return "Refreshing\u{2026}" }
+        switch store.refresh {
+        case .checking: return dispatchedAt == nil ? "Checking for a queue\u{2026}" : "Checking for a newer queue\u{2026}"
+        case .updated: return "Updated just now."
+        case .upToDate: return "Up to date."
+        case .unreachable: return "Couldn\u{2019}t reach ATVQ Deployer; still trying."
+        case .idle: return nil
+        }
     }
 
     private static func relative(_ date: Date, now: Date) -> String {
